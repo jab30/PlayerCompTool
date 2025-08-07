@@ -10,7 +10,6 @@ from plotly.subplots import make_subplots
 # Page config
 st.set_page_config(
     page_title="NCAA Player Comp Tool",
-    page_icon="⚾",
     layout="wide"
 )
 
@@ -36,6 +35,16 @@ def load_data():
         data_2024 = pd.read_csv('NCAA Cards 25 - 2024_Data.csv')
         data_2023 = pd.read_csv('NCAA Cards 25 - 2023_Data.csv')
         data_2022 = pd.read_csv('NCAA Cards 25 - 2022_Data.csv')
+
+        # Clean data to avoid Arrow conversion issues
+        for df in [data_2025, data_2024, data_2023, data_2022]:
+            # Convert playerFullName to string to avoid mixed types
+            if 'playerFullName' in df.columns:
+                df['playerFullName'] = df['playerFullName'].astype(str)
+            # Convert other text columns to string
+            for col in ['newestTeamName', 'pos']:
+                if col in df.columns:
+                    df[col] = df[col].astype(str)
 
         # Add year column to each dataset
         data_2025['Year'] = 2025
@@ -158,16 +167,50 @@ def prepare_comparison_data(*datasets):
     historical_data = pd.concat(valid_datasets, ignore_index=True)
 
     # Handle column name differences across years
-    # 2024 data has different column names for some stats
+    # 2024 data has different column names and missing stats
     column_mappings = {
-        'Miss vs Spin 83+': 'Miss vs 83+Spin',  # 2024 column name difference
+        # 2024 specific mappings
         'Z-Swing': 'InZoneSwing%',  # 2024 uses Z-Swing instead of InZoneSwing%
-        'O-Swing%': 'Chase%'  # 2024 uses O-Swing% which is similar to Chase%
+        'O-Swing%': 'Chase%',  # 2024 uses O-Swing% for Chase%
+        'Miss vs Spin 83+': 'Miss vs 83+Spin',  # 2024 column name difference
     }
 
+    # Debug: Print available columns for troubleshooting
+    print("DEBUG - Available columns in historical data:")
+    print(sorted(historical_data.columns.tolist()))
+    
     for old_col, new_col in column_mappings.items():
-        if old_col in historical_data.columns and new_col not in historical_data.columns:
-            historical_data[new_col] = historical_data[old_col]
+        if old_col in historical_data.columns:
+            print(f"DEBUG - Mapping {old_col} -> {new_col}")
+            # Only map if the target column doesn't already exist or has missing data
+            if new_col not in historical_data.columns:
+                historical_data[new_col] = historical_data[old_col]
+            else:
+                # Merge the data - use new_col where it exists, fill with old_col where it's missing
+                mask = historical_data[new_col].isin(['-', '', np.nan]) | historical_data[new_col].isna()
+                historical_data.loc[mask, new_col] = historical_data.loc[mask, old_col]
+                print(f"DEBUG - Merged {old_col} into existing {new_col} column")
+        else:
+            print(f"DEBUG - Column {old_col} not found in historical data")
+            
+    # Debug: Check if Chase% exists after mapping
+    if 'Chase%' in historical_data.columns:
+        print("DEBUG - Chase% column exists after mapping")
+        chase_sample = historical_data['Chase%'].head(10).tolist()
+        print(f"DEBUG - Chase% sample values: {chase_sample}")
+        # Count non-missing values
+        non_missing = historical_data['Chase%'][~historical_data['Chase%'].isin(['-', '', np.nan])].count()
+        total = len(historical_data)
+        print(f"DEBUG - Chase% non-missing values: {non_missing}/{total}")
+    else:
+        print("DEBUG - Chase% column still missing after mapping")
+        
+    # Handle missing stats in 2024 data by creating placeholder columns
+    # This prevents "None" values in comparisons
+    missing_stats_2024 = ['O-Contact%', 'HardHit%', 'Contact%']
+    for stat in missing_stats_2024:
+        if stat not in historical_data.columns:
+            historical_data[stat] = np.nan  # Fill with NaN so they're excluded from similarity calc
 
     return historical_data
 
@@ -268,18 +311,37 @@ def calculate_player_similarity(target_player, historical_data, comparison_stats
                     valid_comparisons += weight  # Use weight in denominator for proper averaging
                     stat_similarities[stat] = similarity
 
-        # Require a substantial number of valid comparisons (at least 60% of possible stats)
-        total_possible_weight = sum([2.5 if stat in ['ExitVel', 'Air EV', '90thExitVel', 'MinMxExitVel',
-                                                     'K%', 'BB%', 'Swing%', 'InZoneSwing%', 'Z-Contact%',
-                                                     'Chase%', 'SwStrk%', 'O-Contact%', 'Contact%'] else
-                                     2.3 if stat in ['HardHit%', 'EV95+LA10-30%'] else
-                                     2.2 if stat in ['Miss vs 93+ FB', 'Miss vs 83+Spin'] else
-                                     2.0 if stat in ['AVG', 'wOBA', 'xWOBA'] else
-                                     1.9 if stat in ['2B', 'HR'] else
-                                     1.8 if 'xSLG' in stat else
-                                     1.6 if stat in ['LaunchAng', 'LA10-30%'] else 1.0
-                                     for stat in comparison_stats])
+        # Calculate total possible weight dynamically based on available stats for this player
+        def get_stat_weight(stat):
+            if stat in ['ExitVel', 'Air EV', '90thExitVel', 'MinMxExitVel']:
+                return 2.5
+            elif stat in ['K%', 'BB%', 'Swing%', 'InZoneSwing%', 'Z-Contact%', 'Chase%', 'SwStrk%', 'O-Contact%', 'Contact%']:
+                return 2.5
+            elif stat in ['HardHit%', 'EV95+LA10-30%']:
+                return 2.3
+            elif stat in ['Miss vs 93+ FB', 'Miss vs 83+Spin']:
+                return 2.2
+            elif stat in ['AVG', 'wOBA', 'xWOBA']:
+                return 2.0
+            elif stat in ['2B', 'HR']:
+                return 1.9
+            elif 'xSLG' in stat:
+                return 1.8
+            elif stat in ['LaunchAng', 'LA10-30%']:
+                return 1.6
+            else:
+                return 1.0
 
+        # Calculate total possible weight for ALL stats
+        total_possible_weight = sum(get_stat_weight(stat) for stat in comparison_stats)
+        
+        # Count actual number of stats compared (not weighted)
+        actual_stats_compared = len(stat_similarities)
+
+        # Calculate actual coverage percentage with more precision
+        coverage_percentage = round((valid_comparisons / total_possible_weight) * 100, 1)
+
+        # Require a substantial number of valid comparisons (at least 60% of possible stats)
         if valid_comparisons >= (total_possible_weight * 0.6):  # At least 60% of weighted stats available
             avg_similarity = total_similarity / valid_comparisons
             similarities.append({
@@ -288,9 +350,9 @@ def calculate_player_similarity(target_player, historical_data, comparison_stats
                 'position': historical_player.get('pos', 'Unknown'),
                 'year': historical_player.get('Year', 'Unknown'),
                 'similarity_score': avg_similarity,
-                'valid_stats': int(valid_comparisons),
+                'valid_stats': actual_stats_compared,
                 'total_possible_stats': len(comparison_stats),
-                'coverage_pct': (valid_comparisons / total_possible_weight) * 100,
+                'coverage_pct': coverage_percentage,
                 'stat_breakdown': stat_similarities,
                 'player_data': historical_player
             })
@@ -398,7 +460,7 @@ def create_comparison_chart(target_player, comp_players, stats_to_show):
 
 
 def main():
-    st.title("⚾ NCAA Player Comparison Tool")
+    st.title("NCAA Player Comparison Tool")
     st.markdown("Find the most statistically similar players from 2022-2024 to any 2025 player")
 
     # Load data
@@ -490,6 +552,12 @@ def main():
             # Show summary of search
             st.success(
                 f"Found {len(similarities)} potential matches from {len(historical_data)} players across {len(year_options)} years")
+            
+            # Debug: Show which stats are missing from historical data
+            if st.sidebar.checkbox("Show debug info"):
+                missing_stats = [stat for stat in comparison_stats if stat not in historical_data.columns]
+                if missing_stats:
+                    st.sidebar.warning(f"Missing stats in historical data: {', '.join(missing_stats)}")
 
     # Display results
     if 'comparisons' in st.session_state:
@@ -497,7 +565,7 @@ def main():
 
         # Show search parameters
         years_searched = ", ".join(map(str, st.session_state.selected_years))
-        st.info(f"🎯 **Prioritizing Exit Velocity & Plate Discipline** | Searched years: {years_searched}")
+        st.info(f"Prioritizing Exit Velocity & Plate Discipline | Searched years: {years_searched}")
 
         # Create comparison table
         comp_data = []
@@ -514,6 +582,8 @@ def main():
             })
 
         comp_df = pd.DataFrame(comp_data)
+        # Clean the dataframe to avoid Arrow conversion issues
+        comp_df = comp_df.astype(str)
         st.dataframe(comp_df, use_container_width=True)
 
         # Statistical comparison section
@@ -535,23 +605,40 @@ def main():
             st.subheader("Detailed Statistical Comparison")
 
             detailed_comp = {'Stat': selected_stats}
+            
+            # Add target player
             detailed_comp[st.session_state.target_player['playerFullName']] = [
-                st.session_state.target_player.get(stat, 'N/A') for stat in selected_stats
+                str(st.session_state.target_player.get(stat, 'N/A')) for stat in selected_stats
             ]
 
+            # Add comparison players 
             for i, comp in enumerate(st.session_state.comparisons[:5]):  # Top 5 comps
-                detailed_comp[f"{comp['player']} ({comp['year']})"] = [
-                    comp['player_data'].get(stat, 'N/A') for stat in selected_stats
-                ]
+                comp_name = f"{comp['player']} ({comp['year']})"
+                comp_values = []
+                for stat in selected_stats:
+                    value = comp['player_data'].get(stat, 'N/A')
+                    # Handle missing stats better - show year-specific note
+                    if pd.isna(value) or value == '' or value is None:
+                        if comp['year'] == 2024 and stat in ['O-Contact%', 'HardHit%', 'Contact%']:
+                            value = 'N/A (2024)'  # Indicate this stat wasn't collected in 2024
+                        else:
+                            value = 'N/A'
+                    comp_values.append(str(value))
+                detailed_comp[comp_name] = comp_values
 
             detailed_df = pd.DataFrame(detailed_comp)
+            
+            # Ensure all columns are strings to prevent Arrow issues
+            for col in detailed_df.columns:
+                detailed_df[col] = detailed_df[col].astype(str)
+                
             st.dataframe(detailed_df, use_container_width=True)
 
             # Create radar chart
             if len(selected_stats) >= 3:
                 st.subheader("Player Comparison - Percentile Rankings")
                 st.info(
-                    "📊 Chart shows percentile rankings relative to all 2025 NCAA players. Higher values = better performance.")
+                    "Chart shows percentile rankings relative to all 2025 NCAA players. Higher values = better performance.")
 
                 radar_fig = create_comparison_chart(
                     st.session_state.target_player,
