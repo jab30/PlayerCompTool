@@ -3,11 +3,13 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics.pairwise import cosine_similarity
-import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+# -----------------------------
+# Tunables
+# -----------------------------
+COVERAGE_MIN = 0.40        # require at least 40% of the *usable* weight
+RELIABILITY_FLOOR = 0.35   # floor for reliability when attempts are unknown/small
 
 # Page config
 st.set_page_config(
@@ -76,7 +78,7 @@ def clean_stat_value(value):
 
 def get_comparison_stats():
     """Define stats used for player comparison"""
-    # Keep outcomes in the set but we will weight them very low
+    # Keep outcomes in the set but weight them very low
     return [
         'AVG', 'wOBA', 'xWOBA', '2B', 'HR', 'K%', 'BB%', 'ExitVel', 'Air EV',
         '90thExitVel', 'MinMxExitVel', 'LaunchAng', 'LA10-30%', 'EV95+LA10-30%',
@@ -276,7 +278,7 @@ def stat_weight(stat):
 
 
 def calculate_player_similarity(target_player, historical_data, comparison_stats, stat_means, stat_stds):
-    """Similarity using z-scores, reliability weighting, and robust clipping"""
+    """Similarity using z-scores, reliability weighting, and robust clipping with coverage fix"""
     # Clean target player stats to numeric once
     target_stats = {}
     for stat in comparison_stats:
@@ -286,6 +288,7 @@ def calculate_player_similarity(target_player, historical_data, comparison_stats
     similarities = []
 
     for _, historical_player in historical_data.iterrows():
+        # skip same player (if ids exist)
         if 'playerId' in historical_player and 'playerId' in target_player:
             if historical_player['playerId'] == target_player['playerId']:
                 continue
@@ -294,6 +297,7 @@ def calculate_player_similarity(target_player, historical_data, comparison_stats
         valid_weight_sum = 0.0
         stat_similarities = {}
 
+        # First pass: compute similarities & accumulate weight actually used
         for stat in comparison_stats:
             if stat not in target_stats or stat not in historical_player:
                 continue
@@ -318,11 +322,11 @@ def calculate_player_similarity(target_player, historical_data, comparison_stats
             z_diff = abs(t_z - h_z)
             z_diff = min(z_diff, 2.5)  # clip huge gaps
 
-            # reliability per player-stat
+            # reliability per player-stat with floor
             n_hist = stat_attempts(historical_player, stat)
             n_targ = stat_attempts(target_player, stat)
-            rw_hist = reliability_w(n_hist, k_for(stat))
-            rw_targ = reliability_w(n_targ, k_for(stat))
+            rw_hist = max(reliability_w(n_hist, k_for(stat)), RELIABILITY_FLOOR)
+            rw_targ = max(reliability_w(n_targ, k_for(stat)), RELIABILITY_FLOOR)
             rw = (rw_hist + rw_targ) / 2.0
 
             w = stat_weight(stat) * rw
@@ -337,11 +341,32 @@ def calculate_player_similarity(target_player, historical_data, comparison_stats
             valid_weight_sum += w
             stat_similarities[stat] = similarity
 
-        # Require 60 percent of total possible weight available
-        total_possible_weight = sum(stat_weight(s) for s in comparison_stats)
-        coverage = (valid_weight_sum / total_possible_weight) * 100 if total_possible_weight > 0 else 0
+        # Second pass: compute *possible* weight only over usable stats (with floor)
+        possible_weight_sum = 0.0
+        for stat in comparison_stats:
+            if stat not in target_stats or stat not in historical_player:
+                continue
+            t_raw = target_stats[stat]
+            h_raw = clean_stat_value(historical_player[stat])
+            if pd.isna(t_raw) or pd.isna(h_raw):
+                continue
+            mean = stat_means.get(stat); std = stat_stds.get(stat)
+            if mean is None or std is None:
+                continue
 
-        if valid_weight_sum >= (0.60 * total_possible_weight):
+            n_hist = stat_attempts(historical_player, stat)
+            n_targ = stat_attempts(target_player, stat)
+            rw_hist = max(reliability_w(n_hist, k_for(stat)), RELIABILITY_FLOOR)
+            rw_targ = max(reliability_w(n_targ, k_for(stat)), RELIABILITY_FLOOR)
+            rw = (rw_hist + rw_targ) / 2.0
+
+            w = stat_weight(stat) * rw
+            if w > 0:
+                possible_weight_sum += w
+
+        coverage = (valid_weight_sum / possible_weight_sum) * 100 if possible_weight_sum > 0 else 0
+
+        if possible_weight_sum > 0 and (valid_weight_sum >= COVERAGE_MIN * possible_weight_sum):
             avg_similarity = total_similarity / valid_weight_sum if valid_weight_sum > 0 else 0.0
             similarities.append({
                 'player': historical_player.get('playerFullName', 'Unknown'),
@@ -396,7 +421,6 @@ def create_comparison_chart(target_player, comp_players, stats_to_show):
             comp_percentiles.append(percentile_rank)
         comp_percentiles.append(comp_percentiles[0])
 
-        # simple rgba from hex
         hexc = colors[i % len(colors)]
         r = int(hexc[1:3], 16)
         g = int(hexc[3:5], 16)
@@ -419,33 +443,17 @@ def create_comparison_chart(target_player, comp_players, stats_to_show):
                 visible=True,
                 range=[0, 100],
                 tickvals=[0, 25, 50, 75, 100],
-                ticktext=['0th', '25th', '50th', '75th', '100th'],
-                tickfont=dict(color='black', size=11),
-                gridcolor='lightgray',
-                title=dict(text="Percentile Rank", font=dict(color='black', size=12))
+                ticktext=['0th', '25th', '50th', '75th', '100th']
             ),
-            angularaxis=dict(
-                tickfont=dict(size=10, color='black'),
-                rotation=90
-            )
+            angularaxis=dict(rotation=90)
         ),
         showlegend=True,
-        legend=dict(
-            font=dict(color='black', size=11),
-            bgcolor='white',
-            bordercolor='black',
-            borderwidth=1
-        ),
         title={
             'text': "Player Comparison - Percentile Rankings<br><sub>Higher values = better performance relative to 2025 NCAA population</sub>",
-            'x': 0.5,
-            'font': {'size': 16, 'color': 'black'}
+            'x': 0.5
         },
         height=700,
         width=700,
-        font=dict(size=11, color='black'),
-        paper_bgcolor='white',
-        plot_bgcolor='white'
     )
 
     return fig
