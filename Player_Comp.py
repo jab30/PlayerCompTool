@@ -407,7 +407,7 @@ def create_comparison_chart(target_player, comp_players, stats_to_show):
         r=target_percentiles,
         theta=categories,
         fill='toself',
-        name=f"{target_player.get('playerFullName', 'Target Player')} (2025)",
+        name=f"{target_player.get('playerFullName', 'Target Player')} ({target_player.get('Year', 'Yr')})",
         line_color='red',
         fillcolor='rgba(255,0,0,0.15)',
         line_width=3
@@ -461,7 +461,7 @@ def create_comparison_chart(target_player, comp_players, stats_to_show):
 
 def main():
     st.title("NCAA Player Comparison Tool")
-    st.markdown("Find the most statistically similar players from 2022-2024 to any 2025 player")
+    st.markdown("Find the most statistically similar players between 2025 and 2022–2024. Choose search direction below.")
 
     # Load data
     data_2025, data_2024, data_2023, data_2022 = load_data()
@@ -470,61 +470,65 @@ def main():
         return
 
     # Sidebar controls
+    st.sidebar.header("Search Mode")
+    mode = st.sidebar.radio(
+        "What do you want to compare?",
+        ["Find comps for a 2025 player (to 22–24 pool)",
+         "Find comps for a 2022–24 player (to 2025 pool)"]
+    )
+
     st.sidebar.header("Player Selection")
 
-    player_names = sorted([name for name in data_2025['playerFullName'].dropna().unique() if name])
+    # Prepare player lists
+    hist_all = pd.concat([df for df in [data_2024, data_2023, data_2022] if df is not None], ignore_index=True)
 
-    selected_player_name = st.sidebar.selectbox(
-        "Choose a 2025 player:",
-        player_names,
-        index=0 if player_names else None
-    )
+    if mode == "Find comps for a 2025 player (to 22–24 pool)":
+        # Source: 2025; Pool: 2022–24
+        player_names = sorted([name for name in data_2025['playerFullName'].dropna().unique() if name])
+        selected_player_name = st.sidebar.selectbox("Choose a 2025 player:", player_names, index=0 if player_names else None)
+        if not selected_player_name:
+            st.warning("No players available for selection")
+            return
+        target_player = data_2025[data_2025['playerFullName'] == selected_player_name].iloc[0]
+        comparison_pool = hist_all
+        pool_years_text = "2024, 2023, 2022"
+    else:
+        # Source: 2022–24; Pool: 2025
+        year_choice = st.sidebar.selectbox("Choose source year:", [2024, 2023, 2022], index=0)
+        if year_choice == 2024:
+            src_df = data_2024
+        elif year_choice == 2023:
+            src_df = data_2023
+        else:
+            src_df = data_2022
+        src_players = sorted([name for name in src_df['playerFullName'].dropna().unique() if name])
+        selected_player_name = st.sidebar.selectbox(f"Choose a {year_choice} player:", src_players, index=0 if src_players else None)
+        if not selected_player_name:
+            st.warning("No players available for selection")
+            return
+        target_player = src_df[src_df['playerFullName'] == selected_player_name].iloc[0]
+        comparison_pool = data_2025
+        pool_years_text = "2025"
 
-    if not selected_player_name:
-        st.warning("No players available for selection")
-        return
-
-    target_player = data_2025[data_2025['playerFullName'] == selected_player_name].iloc[0]
-
-    # Comparison controls
+    # Comparison settings
     st.sidebar.header("Comparison Settings")
     num_comps = st.sidebar.slider("Number of comparisons to show:", 1, 20, 10)
-    min_games = st.sidebar.slider("Minimum games played:", 0, 50, 10)
+    min_games = st.sidebar.slider("Minimum games played in comparison pool:", 0, 50, 10)
 
-    year_options = st.sidebar.multiselect(
-        "Include players from years:",
-        [2024, 2023, 2022],
-        default=[2024, 2023, 2022]
-    )
-
+    # Optional position filter (applies to comparison pool)
+    pool_positions = sorted(comparison_pool['pos'].dropna().unique().tolist()) if 'pos' in comparison_pool.columns else []
     position_filter = st.sidebar.multiselect(
-        "Filter by position:",
-        ['All'] + sorted(pd.concat([data_2024, data_2023, data_2022])['pos'].dropna().unique().tolist()),
+        "Filter comparison pool by position:",
+        ['All'] + pool_positions,
         default=['All']
     )
 
     # Compute comparisons
-    if st.sidebar.button("Find Player Comparisons") or 'comparisons' not in st.session_state:
-        if not year_options:
-            st.error("Please select at least one year for historical comparisons")
-            return
-
+    if st.sidebar.button("Find Player Comparisons") or 'comparisons' not in st.session_state or 'direction' not in st.session_state or st.session_state.direction != mode:
         with st.spinner("Calculating player similarities with z-scores and reliability weighting..."):
-            historical_datasets = []
-            if 2024 in year_options and data_2024 is not None:
-                historical_datasets.append(data_2024)
-            if 2023 in year_options and data_2023 is not None:
-                historical_datasets.append(data_2023)
-            if 2022 in year_options and data_2022 is not None:
-                historical_datasets.append(data_2022)
+            historical_data = comparison_pool.copy()
 
-            if not historical_datasets:
-                st.error("No valid historical data found for selected years")
-                return
-
-            historical_data = prepare_comparison_data(*historical_datasets)
-
-            # Optional filters
+            # Optional filters on the pool
             if min_games > 0 and 'G' in historical_data.columns:
                 historical_data = historical_data[historical_data['G'] >= min_games]
 
@@ -533,7 +537,7 @@ def main():
 
             comparison_stats = get_comparison_stats()
 
-            # Fit z-score parameters on the selected historical set
+            # Fit z-score parameters on the *pool* you are searching across
             stat_means, stat_stds = fit_standardization(historical_data, comparison_stats)
 
             # Calculate similarities
@@ -548,11 +552,11 @@ def main():
             st.session_state.comparisons = similarities[:num_comps]
             st.session_state.target_player = target_player
             st.session_state.comparison_stats = comparison_stats
-            st.session_state.selected_years = year_options
+            st.session_state.pool_years_text = pool_years_text
+            st.session_state.direction = mode
+            st.session_state.pool_size = len(historical_data)
 
-            st.success(
-                f"Found {len(similarities)} potential matches from {len(historical_data)} players across {len(year_options)} years"
-            )
+            st.success(f"Found {len(similarities)} potential matches from {len(historical_data)} players in the pool ({pool_years_text}).")
 
             if st.sidebar.checkbox("Show model weights and standardization"):
                 st.write("Model: Rule-based weighted similarity on z-scores with reliability weighting")
@@ -565,9 +569,7 @@ def main():
     # Display results
     if 'comparisons' in st.session_state:
         st.header(f"Top {len(st.session_state.comparisons)} Most Similar Players")
-
-        years_searched = ", ".join(map(str, st.session_state.selected_years))
-        st.info(f"Emphasizing EV, decisions, contact, and expected power. Searched years: {years_searched}")
+        st.info(f"Pool searched: {st.session_state.pool_years_text} • Pool size: {st.session_state.pool_size}")
 
         comp_data = []
         for i, comp in enumerate(st.session_state.comparisons):
@@ -602,7 +604,9 @@ def main():
             st.subheader("Detailed Statistical Comparison")
 
             detailed_comp = {'Stat': selected_stats}
-            detailed_comp[st.session_state.target_player['playerFullName']] = [
+            # Display the selected player's values
+            player_name_display = st.session_state.target_player['playerFullName']
+            detailed_comp[player_name_display] = [
                 str(st.session_state.target_player.get(stat, 'N/A')) for stat in selected_stats
             ]
 
