@@ -1,3 +1,5 @@
+# ncaa_player_comp_tool.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -30,7 +32,6 @@ st.markdown("""
 def load_data():
     """Load all NCAA data files"""
     try:
-        # Load all datasets with correct file paths
         data_2025 = pd.read_csv('NCAA Cards 25 - 2025_Data.csv')
         data_2024 = pd.read_csv('NCAA Cards 25 - 2024_Data.csv')
         data_2023 = pd.read_csv('NCAA Cards 25 - 2023_Data.csv')
@@ -38,10 +39,8 @@ def load_data():
 
         # Clean data to avoid Arrow conversion issues
         for df in [data_2025, data_2024, data_2023, data_2022]:
-            # Convert playerFullName to string to avoid mixed types
             if 'playerFullName' in df.columns:
                 df['playerFullName'] = df['playerFullName'].astype(str)
-            # Convert other text columns to string
             for col in ['newestTeamName', 'pos']:
                 if col in df.columns:
                     df[col] = df[col].astype(str)
@@ -62,20 +61,22 @@ def clean_stat_value(value):
     """Clean and normalize statistical values"""
     if pd.isna(value) or value == '' or value == '-':
         return np.nan
-
     if isinstance(value, str):
         if '%' in value:
-            return float(value.replace('%', '')) / 100
+            try:
+                return float(value.replace('%', '')) / 100.0
+            except:
+                return np.nan
         try:
             return float(value)
         except:
             return np.nan
-
     return float(value) if not pd.isna(value) else np.nan
 
 
 def get_comparison_stats():
-    """Define ALL stats used for player comparison - using every column specified"""
+    """Define stats used for player comparison"""
+    # Keep outcomes in the set but we will weight them very low
     return [
         'AVG', 'wOBA', 'xWOBA', '2B', 'HR', 'K%', 'BB%', 'ExitVel', 'Air EV',
         '90thExitVel', 'MinMxExitVel', 'LaunchAng', 'LA10-30%', 'EV95+LA10-30%',
@@ -86,7 +87,7 @@ def get_comparison_stats():
 
 
 def get_percentiles_data():
-    """Return the percentile reference data from the 2025 dataset analysis"""
+    """Percentile reference data for radar chart only"""
     percentiles = {
         'K%': {'0th': 2.2, '50th': 17.7, '100th': 40.6},
         'BB%': {'0th': 2.5, '50th': 11.0, '100th': 26.0},
@@ -113,112 +114,170 @@ def get_percentiles_data():
 
 
 def calculate_percentile_rank(value, stat_name, percentiles_data):
-    """Calculate the percentile rank for a given stat value using 0th, 50th, and 100th percentiles"""
+    """Percentile rank for radar chart"""
     if stat_name not in percentiles_data:
-        return 50  # Default to 50th percentile if stat not found
-
-    # Get the three reference points
-    min_val = percentiles_data[stat_name]['0th']  # Minimum value (0th percentile)
-    median_val = percentiles_data[stat_name]['50th']  # Median value (50th percentile)
-    max_val = percentiles_data[stat_name]['100th']  # Maximum value (100th percentile)
-
+        return 50
+    min_val = percentiles_data[stat_name]['0th']
+    median_val = percentiles_data[stat_name]['50th']
+    max_val = percentiles_data[stat_name]['100th']
     if pd.isna(value) or value == '' or value == '-':
-        return 50  # Default to 50th percentile for missing values
-
-    # Clean the value
+        return 50
     clean_val = clean_stat_value(value)
     if pd.isna(clean_val):
         return 50
-
-    # Convert percentages back to actual values for comparison
     if isinstance(value, str) and '%' in str(value):
-        clean_val = clean_val * 100  # Convert back to percentage scale
-
-    # Handle edge cases where min = max (no variance)
+        clean_val = clean_val * 100
     if max_val == min_val:
         return 50
-
-    # Calculate percentile rank using linear interpolation
     if clean_val <= min_val:
         return 0
     elif clean_val <= median_val:
-        # Linear interpolation between 0th and 50th percentile
         if median_val == min_val:
             return 50
         return 0 + (50 * (clean_val - min_val) / (median_val - min_val))
     elif clean_val <= max_val:
-        # Linear interpolation between 50th and 100th percentile
         if max_val == median_val:
             return 50
         return 50 + (50 * (clean_val - median_val) / (max_val - median_val))
     else:
-        # Above 100th percentile - cap at 100th percentile
         return 100
 
 
 def prepare_comparison_data(*datasets):
     """Prepare historical data for comparison from selected datasets"""
-    # Filter out empty datasets and combine
     valid_datasets = [df for df in datasets if df is not None and len(df) > 0]
-
     if not valid_datasets:
         return pd.DataFrame()
-
     historical_data = pd.concat(valid_datasets, ignore_index=True)
 
-    # Handle column name differences across years
-    # 2024 data has different column names and missing stats
     column_mappings = {
-        # 2024 specific mappings
-        'Z-Swing': 'InZoneSwing%',  # 2024 uses Z-Swing instead of InZoneSwing%
-        'O-Swing%': 'Chase%',  # 2024 uses O-Swing% for Chase%
-        'Miss vs Spin 83+': 'Miss vs 83+Spin',  # 2024 column name difference
+        'Z-Swing': 'InZoneSwing%',
+        'O-Swing%': 'Chase%',
+        'Miss vs Spin 83+': 'Miss vs 83+Spin',
     }
 
-    # Debug: Print available columns for troubleshooting
-    print("DEBUG - Available columns in historical data:")
-    print(sorted(historical_data.columns.tolist()))
-    
+    # Map names if needed
     for old_col, new_col in column_mappings.items():
         if old_col in historical_data.columns:
-            print(f"DEBUG - Mapping {old_col} -> {new_col}")
-            # Only map if the target column doesn't already exist or has missing data
             if new_col not in historical_data.columns:
                 historical_data[new_col] = historical_data[old_col]
             else:
-                # Merge the data - use new_col where it exists, fill with old_col where it's missing
                 mask = historical_data[new_col].isin(['-', '', np.nan]) | historical_data[new_col].isna()
                 historical_data.loc[mask, new_col] = historical_data.loc[mask, old_col]
-                print(f"DEBUG - Merged {old_col} into existing {new_col} column")
-        else:
-            print(f"DEBUG - Column {old_col} not found in historical data")
-            
-    # Debug: Check if Chase% exists after mapping
-    if 'Chase%' in historical_data.columns:
-        print("DEBUG - Chase% column exists after mapping")
-        chase_sample = historical_data['Chase%'].head(10).tolist()
-        print(f"DEBUG - Chase% sample values: {chase_sample}")
-        # Count non-missing values
-        non_missing = historical_data['Chase%'][~historical_data['Chase%'].isin(['-', '', np.nan])].count()
-        total = len(historical_data)
-        print(f"DEBUG - Chase% non-missing values: {non_missing}/{total}")
-    else:
-        print("DEBUG - Chase% column still missing after mapping")
-        
-    # Handle missing stats in 2024 data by creating placeholder columns
-    # This prevents "None" values in comparisons
+
+    # Create placeholders for stats that do not exist in older years
     missing_stats_2024 = ['O-Contact%', 'HardHit%', 'Contact%']
     for stat in missing_stats_2024:
         if stat not in historical_data.columns:
-            historical_data[stat] = np.nan  # Fill with NaN so they're excluded from similarity calc
+            historical_data[stat] = np.nan
 
     return historical_data
 
 
-def calculate_player_similarity(target_player, historical_data, comparison_stats):
-    """Calculate similarity scores between target player and historical players using ALL specified stats"""
+# -----------------------------
+# New: standardization and reliability helpers
+# -----------------------------
 
-    # Clean target player stats
+def fit_standardization(historical_data, comparison_stats):
+    """Compute means and stds for each stat on historical data for z-scores"""
+    means = {}
+    stds = {}
+    for s in comparison_stats:
+        if s in historical_data.columns:
+            col = pd.to_numeric(historical_data[s], errors="coerce")
+            means[s] = np.nanmean(col)
+            std = np.nanstd(col)
+            stds[s] = std if std and std > 1e-8 else 1.0
+    return means, stds
+
+
+def zscore(value, mean, std):
+    v = clean_stat_value(value)
+    if pd.isna(v):
+        return np.nan
+    return (v - mean) / std
+
+
+# You can adapt these to your real column names for attempts or exposures
+ATTEMPT_COLUMN_FALLBACKS = {
+    "PA": ["PA", "PlateAppr", "PlateAppearances", "PAs"],
+    "BBE": ["BattedBalls", "BBE", "Batted Balls"],
+    "Seen_93plus_FB": ["Seen_93plus_FB", "FB_93plus_Seen", "FB93Seen"],
+    "Seen_83plus_Spin": ["Seen_83plus_Spin", "Spin_83plus_Seen", "Spin83Seen"],
+}
+
+def get_first_available(row, keys):
+    for k in keys:
+        if k in row and not pd.isna(row.get(k)):
+            return row.get(k)
+    return np.nan
+
+
+def stat_attempts(row, stat):
+    """Best guess attempts driver per stat"""
+    if stat in ["K%", "BB%", "Swing%", "InZoneSwing%", "Z-Contact%", "Chase%", "SwStrk%", "O-Contact%", "Contact%"]:
+        return get_first_available(row, ATTEMPT_COLUMN_FALLBACKS["PA"])
+    if stat in ["ExitVel", "Air EV", "90thExitVel", "EV95+LA10-30%", "HardHit%", "LaunchAng", "LA10-30%"]:
+        return get_first_available(row, ATTEMPT_COLUMN_FALLBACKS["BBE"])
+    if stat in ["Miss vs 93+ FB", "xSLG vs 93+ FB"]:
+        return get_first_available(row, ATTEMPT_COLUMN_FALLBACKS["Seen_93plus_FB"])
+    if stat in ["Miss vs 83+Spin", "xSLG vs 83+ Spin"]:
+        return get_first_available(row, ATTEMPT_COLUMN_FALLBACKS["Seen_83plus_Spin"])
+    if stat in ["AVG", "2B", "HR", "wOBA", "xWOBA"]:
+        return get_first_available(row, ATTEMPT_COLUMN_FALLBACKS["PA"])
+    return np.nan
+
+
+K_VALUES = {
+    "plate": 150,    # PA-based stats
+    "bbe": 80,       # batted-ball based
+    "pitch": 75,     # pitch exposure based
+    "realized": 300  # realized outcomes
+}
+
+def k_for(stat):
+    if stat in ["K%","BB%","Swing%","InZoneSwing%","Z-Contact%","Chase%","SwStrk%","O-Contact%","Contact%"]:
+        return K_VALUES["plate"]
+    if stat in ["ExitVel","Air EV","90thExitVel","EV95+LA10-30%","HardHit%","LaunchAng","LA10-30%"]:
+        return K_VALUES["bbe"]
+    if stat in ["Miss vs 93+ FB","xSLG vs 93+ FB","Miss vs 83+Spin","xSLG vs 83+ Spin"]:
+        return K_VALUES["pitch"]
+    if stat in ["AVG","2B","HR","wOBA","xWOBA"]:
+        return K_VALUES["realized"]
+    return 150
+
+
+def reliability_w(n, k):
+    if pd.isna(n):
+        return 0.0
+    return float(n) / float(n + k)
+
+
+# New weights: downweight realized outcomes, emphasize skills
+NEW_WEIGHTS = {
+    # contact quality
+    "Air EV": 2.6, "90thExitVel": 2.6, "EV95+LA10-30%": 2.5, "ExitVel": 2.2, "HardHit%": 2.2, "MinMxExitVel": 2.0,
+    # decisions and contact
+    "Z-Contact%": 2.6, "Chase%": 2.6, "SwStrk%": 2.4, "InZoneSwing%": 2.2, "Contact%": 2.2, "O-Contact%": 2.0, "BB%": 2.0, "K%": 2.0,
+    # pitch recognition
+    "Miss vs 93+ FB": 2.3, "Miss vs 83+Spin": 2.3,
+    # expected results
+    "xWOBA": 2.2, "xSLG vs 93+ FB": 1.9, "xSLG vs 83+ Spin": 1.9, "wOBA": 1.2,
+    # batted-ball shape
+    "LaunchAng": 1.4, "LA10-30%": 1.8,
+    # realized outcomes very low
+    "AVG": 0.5, "2B": 0.6, "HR": 0.8,
+    # swing level aggregate
+    "Swing%": 1.6,
+}
+
+def stat_weight(stat):
+    return NEW_WEIGHTS.get(stat, 1.0)
+
+
+def calculate_player_similarity(target_player, historical_data, comparison_stats, stat_means, stat_stds):
+    """Similarity using z-scores, reliability weighting, and robust clipping"""
+    # Clean target player stats to numeric once
     target_stats = {}
     for stat in comparison_stats:
         if stat in target_player:
@@ -226,167 +285,97 @@ def calculate_player_similarity(target_player, historical_data, comparison_stats
 
     similarities = []
 
-    for idx, historical_player in historical_data.iterrows():
-        # Skip if same player (by playerId)
+    for _, historical_player in historical_data.iterrows():
         if 'playerId' in historical_player and 'playerId' in target_player:
             if historical_player['playerId'] == target_player['playerId']:
                 continue
 
-        # Calculate similarity for this player using ALL stats
-        valid_comparisons = 0
-        total_similarity = 0
+        total_similarity = 0.0
+        valid_weight_sum = 0.0
         stat_similarities = {}
 
-        historical_stats = {}
         for stat in comparison_stats:
-            if stat in historical_player:
-                historical_stats[stat] = clean_stat_value(historical_player[stat])
+            if stat not in target_stats or stat not in historical_player:
+                continue
 
-        # Calculate weighted similarity for each stat
-        for stat in comparison_stats:
-            if stat in target_stats and stat in historical_stats:
-                target_val = target_stats[stat]
-                hist_val = historical_stats[stat]
+            target_val = target_stats[stat]
+            hist_val = clean_stat_value(historical_player[stat])
 
-                if not pd.isna(target_val) and not pd.isna(hist_val):
-                    # Enhanced normalization with EXIT VELOCITY and PLATE DISCIPLINE as highest weights
-                    if stat in ['ExitVel', 'Air EV', '90thExitVel', 'MinMxExitVel']:
-                        # EXIT VELOCITY STATS - HIGHEST PRIORITY (typically 70-110 mph range)
-                        if stat == 'MinMxExitVel':
-                            max_possible_diff = 50.0
-                        else:
-                            max_possible_diff = 40.0
-                        diff = min(abs(target_val - hist_val) / max_possible_diff, 1.0)
-                        weight = 2.5  # HIGHEST weight for exit velocity metrics
-                    elif stat in ['K%', 'BB%', 'Swing%', 'InZoneSwing%', 'Z-Contact%', 'Chase%',
-                                  'SwStrk%', 'O-Contact%', 'Contact%']:
-                        # PLATE DISCIPLINE STATS - HIGHEST PRIORITY (0-100% range, stored as 0-1)
-                        max_possible_diff = 1.0
-                        diff = abs(target_val - hist_val) / max_possible_diff
-                        weight = 2.5  # HIGHEST weight for plate discipline/contact stats
-                    elif stat in ['HardHit%', 'EV95+LA10-30%']:
-                        # QUALITY OF CONTACT - Very high priority (combines exit velo + discipline)
-                        max_possible_diff = 1.0
-                        diff = abs(target_val - hist_val) / max_possible_diff
-                        weight = 2.3  # Very high weight for hard contact metrics
-                    elif stat in ['Miss vs 93+ FB', 'Miss vs 83+Spin']:
-                        # PITCH RECOGNITION - Very high priority for plate discipline
-                        max_possible_diff = 1.0
-                        diff = abs(target_val - hist_val) / max_possible_diff
-                        weight = 2.2  # Very high weight for pitch recognition
-                    elif stat in ['AVG', 'wOBA', 'xWOBA']:
-                        # Traditional batting stats - high but secondary to exit velo/discipline
-                        max_possible_diff = 1.0
-                        diff = abs(target_val - hist_val) / max_possible_diff
-                        weight = 2.0  # High weight for key offensive stats
-                    elif stat in ['2B', 'HR']:
-                        # Power counting stats - high weight
-                        max_val = max(abs(target_val), abs(hist_val), 1)
-                        diff = abs(target_val - hist_val) / max_val
-                        weight = 1.9  # High weight for power numbers
-                    elif 'xSLG' in stat:
-                        # Expected slugging (0.000-2.000+ range typically)
-                        max_possible_diff = 2.0
-                        diff = abs(target_val - hist_val) / max_possible_diff
-                        weight = 1.8  # Good weight for expected performance
-                    elif stat in ['LaunchAng', 'LA10-30%']:
-                        # Launch angle metrics - medium-high priority
-                        if stat == 'LaunchAng':
-                            max_possible_diff = 70.0  # Launch angle range
-                        else:
-                            max_possible_diff = 1.0  # Percentage
-                        diff = min(abs(target_val - hist_val) / max_possible_diff, 1.0)
-                        weight = 1.6  # Medium-high weight for launch metrics
-                    else:
-                        # Default handling for any other stats
-                        max_val = max(abs(target_val), abs(hist_val), 0.001)
-                        diff = abs(target_val - hist_val) / max_val
-                        weight = 1.0
+            if pd.isna(target_val) or pd.isna(hist_val):
+                continue
 
-                    # Convert difference to similarity (0-1, where 1 is identical)
-                    similarity = max(0, 1 - diff)
-                    weighted_similarity = similarity * weight
+            mean = stat_means.get(stat)
+            std = stat_stds.get(stat)
+            if mean is None or std is None:
+                continue
 
-                    total_similarity += weighted_similarity
-                    valid_comparisons += weight  # Use weight in denominator for proper averaging
-                    stat_similarities[stat] = similarity
+            t_z = zscore(target_val, mean, std)
+            h_z = zscore(hist_val, mean, std)
+            if pd.isna(t_z) or pd.isna(h_z):
+                continue
 
-        # Calculate total possible weight dynamically based on available stats for this player
-        def get_stat_weight(stat):
-            if stat in ['ExitVel', 'Air EV', '90thExitVel', 'MinMxExitVel']:
-                return 2.5
-            elif stat in ['K%', 'BB%', 'Swing%', 'InZoneSwing%', 'Z-Contact%', 'Chase%', 'SwStrk%', 'O-Contact%', 'Contact%']:
-                return 2.5
-            elif stat in ['HardHit%', 'EV95+LA10-30%']:
-                return 2.3
-            elif stat in ['Miss vs 93+ FB', 'Miss vs 83+Spin']:
-                return 2.2
-            elif stat in ['AVG', 'wOBA', 'xWOBA']:
-                return 2.0
-            elif stat in ['2B', 'HR']:
-                return 1.9
-            elif 'xSLG' in stat:
-                return 1.8
-            elif stat in ['LaunchAng', 'LA10-30%']:
-                return 1.6
-            else:
-                return 1.0
+            # robust absolute difference on z-scale
+            z_diff = abs(t_z - h_z)
+            z_diff = min(z_diff, 2.5)  # clip huge gaps
 
-        # Calculate total possible weight for ALL stats
-        total_possible_weight = sum(get_stat_weight(stat) for stat in comparison_stats)
-        
-        # Count actual number of stats compared (not weighted)
-        actual_stats_compared = len(stat_similarities)
+            # reliability per player-stat
+            n_hist = stat_attempts(historical_player, stat)
+            n_targ = stat_attempts(target_player, stat)
+            rw_hist = reliability_w(n_hist, k_for(stat))
+            rw_targ = reliability_w(n_targ, k_for(stat))
+            rw = (rw_hist + rw_targ) / 2.0
 
-        # Calculate actual coverage percentage with more precision
-        coverage_percentage = round((valid_comparisons / total_possible_weight) * 100, 1)
+            w = stat_weight(stat) * rw
+            if w <= 0:
+                continue
 
-        # Require a substantial number of valid comparisons (at least 60% of possible stats)
-        if valid_comparisons >= (total_possible_weight * 0.6):  # At least 60% of weighted stats available
-            avg_similarity = total_similarity / valid_comparisons
+            # convert distance to similarity in [0,1]
+            similarity = 1.0 - (z_diff / 2.5)
+            similarity = max(0.0, similarity)
+
+            total_similarity += similarity * w
+            valid_weight_sum += w
+            stat_similarities[stat] = similarity
+
+        # Require 60 percent of total possible weight available
+        total_possible_weight = sum(stat_weight(s) for s in comparison_stats)
+        coverage = (valid_weight_sum / total_possible_weight) * 100 if total_possible_weight > 0 else 0
+
+        if valid_weight_sum >= (0.60 * total_possible_weight):
+            avg_similarity = total_similarity / valid_weight_sum if valid_weight_sum > 0 else 0.0
             similarities.append({
                 'player': historical_player.get('playerFullName', 'Unknown'),
                 'team': historical_player.get('newestTeamName', 'Unknown'),
                 'position': historical_player.get('pos', 'Unknown'),
                 'year': historical_player.get('Year', 'Unknown'),
                 'similarity_score': avg_similarity,
-                'valid_stats': actual_stats_compared,
+                'valid_stats': len(stat_similarities),
                 'total_possible_stats': len(comparison_stats),
-                'coverage_pct': coverage_percentage,
+                'coverage_pct': round(coverage, 1),
                 'stat_breakdown': stat_similarities,
                 'player_data': historical_player
             })
 
-    # Sort by similarity score (highest first)
     similarities.sort(key=lambda x: x['similarity_score'], reverse=True)
     return similarities
 
 
 def create_comparison_chart(target_player, comp_players, stats_to_show):
-    """Create radar chart comparing target player with comps using percentiles"""
-
-    # Get percentile reference data
+    """Radar chart comparing target player with comps using percentiles"""
     percentiles_data = get_percentiles_data()
-
-    # Filter stats to only those we have percentile data for
     available_stats = [stat for stat in stats_to_show if stat in percentiles_data]
-
     if not available_stats:
         st.warning("No percentile data available for selected stats")
         return None
 
-    # Prepare data for radar chart using percentiles
-    # Duplicate first stat at end to close the loop
     categories = available_stats + [available_stats[0]]
-
     fig = go.Figure()
 
-    # Add target player
+    # Target
     target_percentiles = []
     for stat in available_stats:
         percentile_rank = calculate_percentile_rank(target_player.get(stat), stat, percentiles_data)
         target_percentiles.append(percentile_rank)
-    # Close the loop by repeating first value
     target_percentiles.append(target_percentiles[0])
 
     fig.add_trace(go.Scatterpolar(
@@ -399,28 +388,31 @@ def create_comparison_chart(target_player, comp_players, stats_to_show):
         line_width=3
     ))
 
-    # Add comparison players
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-    for i, comp in enumerate(comp_players[:5]):  # Top 5 comps
+    for i, comp in enumerate(comp_players[:5]):
         comp_percentiles = []
         for stat in available_stats:
             percentile_rank = calculate_percentile_rank(comp['player_data'].get(stat), stat, percentiles_data)
             comp_percentiles.append(percentile_rank)
-        # Close the loop by repeating first value
         comp_percentiles.append(comp_percentiles[0])
+
+        # simple rgba from hex
+        hexc = colors[i % len(colors)]
+        r = int(hexc[1:3], 16)
+        g = int(hexc[3:5], 16)
+        b = int(hexc[5:7], 16)
 
         fig.add_trace(go.Scatterpolar(
             r=comp_percentiles,
             theta=categories,
             fill='toself',
             name=f"{comp['player']} ({comp['year']})",
-            line_color=colors[i % len(colors)],
-            fillcolor=f'rgba{tuple(list(int(colors[i % len(colors)][j:j + 2], 16) for j in (1, 3, 5)) + [0.1])}',
+            line_color=hexc,
+            fillcolor=f'rgba({r},{g},{b},0.10)',
             line_width=2,
             opacity=0.8
         ))
 
-    # Update layout for percentiles - FIXED TICK LABELS
     fig.update_layout(
         polar=dict(
             radialaxis=dict(
@@ -434,7 +426,7 @@ def create_comparison_chart(target_player, comp_players, stats_to_show):
             ),
             angularaxis=dict(
                 tickfont=dict(size=10, color='black'),
-                rotation=90  # Start at top
+                rotation=90
             )
         ),
         showlegend=True,
@@ -465,7 +457,6 @@ def main():
 
     # Load data
     data_2025, data_2024, data_2023, data_2022 = load_data()
-
     if data_2025 is None:
         st.error("Could not load data files. Please ensure CSV files are in the correct location.")
         return
@@ -473,7 +464,6 @@ def main():
     # Sidebar controls
     st.sidebar.header("Player Selection")
 
-    # Get list of 2025 players
     player_names = sorted([name for name in data_2025['playerFullName'].dropna().unique() if name])
 
     selected_player_name = st.sidebar.selectbox(
@@ -486,20 +476,17 @@ def main():
         st.warning("No players available for selection")
         return
 
-    # Get selected player data
     target_player = data_2025[data_2025['playerFullName'] == selected_player_name].iloc[0]
 
     # Comparison controls
     st.sidebar.header("Comparison Settings")
     num_comps = st.sidebar.slider("Number of comparisons to show:", 1, 20, 10)
-
     min_games = st.sidebar.slider("Minimum games played:", 0, 50, 10)
 
-    # Year selection for historical comparisons
     year_options = st.sidebar.multiselect(
         "Include players from years:",
         [2024, 2023, 2022],
-        default=[2024, 2023, 2022]  # All years by default
+        default=[2024, 2023, 2022]
     )
 
     position_filter = st.sidebar.multiselect(
@@ -508,14 +495,13 @@ def main():
         default=['All']
     )
 
-    # Calculate comparisons
+    # Compute comparisons
     if st.sidebar.button("Find Player Comparisons") or 'comparisons' not in st.session_state:
         if not year_options:
             st.error("Please select at least one year for historical comparisons")
             return
 
-        with st.spinner("Calculating player similarities using exit velocity & plate discipline focus..."):
-            # Prepare historical data from selected years only
+        with st.spinner("Calculating player similarities with z-scores and reliability weighting..."):
             historical_datasets = []
             if 2024 in year_options and data_2024 is not None:
                 historical_datasets.append(data_2024)
@@ -530,44 +516,51 @@ def main():
 
             historical_data = prepare_comparison_data(*historical_datasets)
 
-            # Filter by minimum games
-            if min_games > 0:
+            # Optional filters
+            if min_games > 0 and 'G' in historical_data.columns:
                 historical_data = historical_data[historical_data['G'] >= min_games]
 
-            # Filter by position
             if 'All' not in position_filter and position_filter:
                 historical_data = historical_data[historical_data['pos'].isin(position_filter)]
 
-            # Get comparison stats
             comparison_stats = get_comparison_stats()
 
+            # Fit z-score parameters on the selected historical set
+            stat_means, stat_stds = fit_standardization(historical_data, comparison_stats)
+
             # Calculate similarities
-            similarities = calculate_player_similarity(target_player, historical_data, comparison_stats)
+            similarities = calculate_player_similarity(
+                target_player,
+                historical_data,
+                comparison_stats,
+                stat_means,
+                stat_stds
+            )
 
             st.session_state.comparisons = similarities[:num_comps]
             st.session_state.target_player = target_player
             st.session_state.comparison_stats = comparison_stats
             st.session_state.selected_years = year_options
 
-            # Show summary of search
             st.success(
-                f"Found {len(similarities)} potential matches from {len(historical_data)} players across {len(year_options)} years")
-            
-            # Debug: Show which stats are missing from historical data
-            if st.sidebar.checkbox("Show debug info"):
-                missing_stats = [stat for stat in comparison_stats if stat not in historical_data.columns]
-                if missing_stats:
-                    st.sidebar.warning(f"Missing stats in historical data: {', '.join(missing_stats)}")
+                f"Found {len(similarities)} potential matches from {len(historical_data)} players across {len(year_options)} years"
+            )
+
+            if st.sidebar.checkbox("Show model weights and standardization"):
+                st.write("Model: Rule-based weighted similarity on z-scores with reliability weighting")
+                st.json({s: stat_weight(s) for s in comparison_stats})
+                st.write("Standardization means")
+                st.json(stat_means)
+                st.write("Standardization stds")
+                st.json(stat_stds)
 
     # Display results
     if 'comparisons' in st.session_state:
         st.header(f"Top {len(st.session_state.comparisons)} Most Similar Players")
 
-        # Show search parameters
         years_searched = ", ".join(map(str, st.session_state.selected_years))
-        st.info(f"Prioritizing Exit Velocity & Plate Discipline | Searched years: {years_searched}")
+        st.info(f"Emphasizing EV, decisions, contact, and expected power. Searched years: {years_searched}")
 
-        # Create comparison table
         comp_data = []
         for i, comp in enumerate(st.session_state.comparisons):
             comp_data.append({
@@ -581,15 +574,12 @@ def main():
                 'Valid Stats': f"{comp['valid_stats']}/{comp['total_possible_stats']}"
             })
 
-        comp_df = pd.DataFrame(comp_data)
-        # Clean the dataframe to avoid Arrow conversion issues
-        comp_df = comp_df.astype(str)
+        comp_df = pd.DataFrame(comp_data).astype(str)
         st.dataframe(comp_df, use_container_width=True)
 
         # Statistical comparison section
         st.header("Statistical Comparison")
 
-        # Select stats to display (filter to only those with percentile data)
         available_stats = st.session_state.comparison_stats
         percentile_stats = list(get_percentiles_data().keys())
         available_for_chart = [stat for stat in available_stats if stat in percentile_stats]
@@ -601,51 +591,39 @@ def main():
         )
 
         if selected_stats and len(st.session_state.comparisons) > 0:
-            # Create detailed comparison table
             st.subheader("Detailed Statistical Comparison")
 
             detailed_comp = {'Stat': selected_stats}
-            
-            # Add target player
             detailed_comp[st.session_state.target_player['playerFullName']] = [
                 str(st.session_state.target_player.get(stat, 'N/A')) for stat in selected_stats
             ]
 
-            # Add comparison players 
-            for i, comp in enumerate(st.session_state.comparisons[:5]):  # Top 5 comps
+            for comp in st.session_state.comparisons[:5]:
                 comp_name = f"{comp['player']} ({comp['year']})"
                 comp_values = []
                 for stat in selected_stats:
                     value = comp['player_data'].get(stat, 'N/A')
-                    # Handle missing stats better - show year-specific note
                     if pd.isna(value) or value == '' or value is None:
                         if comp['year'] == 2024 and stat in ['O-Contact%', 'HardHit%', 'Contact%']:
-                            value = 'N/A (2024)'  # Indicate this stat wasn't collected in 2024
+                            value = 'N/A (2024)'
                         else:
                             value = 'N/A'
                     comp_values.append(str(value))
                 detailed_comp[comp_name] = comp_values
 
             detailed_df = pd.DataFrame(detailed_comp)
-            
-            # Ensure all columns are strings to prevent Arrow issues
             for col in detailed_df.columns:
                 detailed_df[col] = detailed_df[col].astype(str)
-                
             st.dataframe(detailed_df, use_container_width=True)
 
-            # Create radar chart
             if len(selected_stats) >= 3:
                 st.subheader("Player Comparison - Percentile Rankings")
-                st.info(
-                    "Chart shows percentile rankings relative to all 2025 NCAA players. Higher values = better performance.")
-
+                st.info("Chart shows percentile rankings relative to all 2025 NCAA players. Higher values = better performance.")
                 radar_fig = create_comparison_chart(
                     st.session_state.target_player,
                     st.session_state.comparisons,
                     selected_stats
                 )
-
                 if radar_fig:
                     st.plotly_chart(radar_fig, use_container_width=True)
             else:
