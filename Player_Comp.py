@@ -446,7 +446,7 @@ def create_comparison_chart(target_player, comp_players, stats_to_show):
             borderwidth=1
         ),
         title={
-            'text': "Player Comparison - Percentile Rankings<br><sub>Higher values = better performance relative to 2025 NCAA population</sub>",
+            'text': "Player Comparison - Percentile Rankings",
             'x': 0.5,
             'font': {'size': 16, 'color': 'black'}
         },
