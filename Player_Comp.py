@@ -639,7 +639,7 @@ def main():
             if len(selected_stats) >= 3:
                 st.subheader("Player Comparison - Percentile Rankings")
                 st.info(
-                    "Chart shows percentile rankings relative to all 2025 NCAA players. Higher values = better performance.")
+                    "Chart shows percentile rankings relative to all 2025 NCAA players.")
 
                 radar_fig = create_comparison_chart(
                     st.session_state.target_player,
